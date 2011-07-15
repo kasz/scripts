@@ -1,0 +1,164 @@
+#!/bin/bash
+
+# UWAGA 1: z uwagi na głupotę MySQL praktycznie nie da się wyczyścić do końca bazy, w związku z czym przed wywołaniem tego skrypty należy zadbać o jej usunięcie
+# UWAGA 2: z powodu braku możliwości rozpakowywania plików na serwerze z poziomu ftp, lepiej wysłać osobno symfony (wcześniej) i podać temu skryptowi jego lokalizację, tak żeby mógł go skopiować razie potrzeby
+# UWAGA 3: nie zapomnieć o udostępnieniu możliwości zewenętrznego połączenia z bazą danych (i o podania aktualnego numeru IP)
+# UWAGA 4: skrypt wymaga programu lftp, z uwagi na możliwość usuwania katalogów posiadających zawartość
+
+# wartości zależne od konretnego serwera / katalogu
+symfonyLocalDir='/home/sfprojects/pzg/lib/vendor/symfony'
+
+namingRoot='pzg' # konwencja wg. ktrórej nazywane będą katalogi z projektem
+
+svnBase='http://svn.xp-dev.com/svn/kaszymczyk/projekty/pzg/src/' # adres repozytorium svn zawierjące projekt
+
+#dane FTP
+ftpDestination='ftp.localhost'
+ftpUser='pzg'
+ftpPass='jDK0eJlqbT'
+
+#dane bazy
+dbDsn='pgsql:host=localhost;dbname=pzg'
+dbUser='pzg_db_user'
+dbPass='pzg_db_pass'
+
+#flagi
+skip_export_flag=0
+skip_database_flag=0
+skip_file_preparing_flag=0
+skip_project_config_flag=0
+skip_controller_allow_flag=0
+skip_ftp_flag=0
+
+echo -e "Skrypt uploadujący najnowszą wersję PZG na serwer z $svnBase do $ftpDestination"
+
+# 1 - export z svna
+i=1;
+while [ -e "${namingRoot}${i}" ]; do
+  i=$[i + 1]
+done
+if [ $skip_export_flag -eq 0 ]
+then
+	svnDest="${namingRoot}${i}"
+	svn export $svnBase $svnDest
+else
+	# poniższe niekoniecznie jest prawdziwe
+	i=$[i - 1]
+	svnDest="${namingRoot}${i}"
+	echo 'Pominięto export z svna'
+fi
+
+# 2 - konfiguracja i stworzenie bazy danych
+# ponieważ jestem leniwy, po prostu kopiuję tymczasowo zawartość symfony z podanego katalogu, a potem go usuwam
+# lepszym rozwiązaniem mogłoby być zmiana treści config/ProjectConfiguration.php tak żeby wskazywała pod podany adres, a potem przywrócić poprzednią wartość
+
+if [ $skip_database_flag -eq 0 ]
+then
+	if [ ! -e ${svnDest}/lib/vendor/symfony ]
+	then
+		cp -R $symfonyLocalDir "${svnDest}/lib/vendor/"
+	fi
+	$svnDest/symfony configure:database $dbDsn $dbUser $dbPass
+	$svnDest/symfony propel:build-sql
+	$svnDest/symfony propel:insert-sql --no-confirmation
+	$svnDest/symfony propel:data-load  
+	$svnDest/symfony cc
+	#rm -rf "${svnDest}/lib/vendor/symfony" # zapomniałem, że nie bardzo jest możliwość kopiowania katalogów
+else
+	echo 'Pominięto wypełnienie bazy danych'
+fi
+
+# 3 - przygotowanie odpowiednich plików
+if [ $skip_file_preparing_flag -eq 0 ]
+then
+	#zmiana wartości konfiguracji
+	
+	#wyciągam wszystkie pliki z katalogu, które nie są web
+	fileList=`ls -Al $svnDest|grep -v web|cat -n|awk '{$1="";$2="";$3="";$4="";$5="";$6="";$7="";$8=""; print $0}'`
+	#echo $fileList
+	if [ ! -e ${svnDest}/pzg ]
+	then
+		mkdir ${svnDest}/pzg
+	fi
+	cd $svnDest
+	pwd
+	mv $fileList pzg/
+	cd ..
+	
+else
+	echo 'Pominięto przygotowywanie plików'
+fi
+
+# 4 - podstawienie odpowiednich wartości w project_config
+# ostrożnie z tym, lokalne zmiany są odwracale wyłącznie ręczną edycją
+if [ $skip_project_config_flag -eq 0 ]
+then
+	# w ProjectConfiguration
+	sed -i "/.*setup.*/ {
+	 n
+	 a\   \$this->setWebDir(\$this->getRootDir().'/../public_html');
+	}" ${svnDest}/pzg/config/ProjectConfiguration.class.php #> ${svnDest}/pzg/config/ProjectConfiguration_temp.class.php
+	#mv ${svnDest}/pzg/config/ProjectConfiguration_temp.class.php ${svnDest}/pzg/config/ProjectConfiguration.class.php
+	
+	# powiadomienie kontrolerów o zmianie lokalizacji 
+	changeLine='s/\/\.\.\/config\/ProjectConfiguration\.class\.php/\/\.\.\/pzg\/config\/ProjectConfiguration\.class\.php/'
+	#sed $changeLine ${svnDest}/web/index.php > ${svnDest}/web/index_temp.php
+	#mv ${svnDest}/web/index_temp.php ${svnDest}/web/index.php
+	sed -i $changeLine ${svnDest}/web/index.php
+	#sed $changeLine ${svnDest}/web/frontend_dev.php > ${svnDest}/web/frontend_dev_temp.php
+	#mv ${svnDest}/web/frontend_dev_temp.php ${svnDest}/web/frontend_dev.php
+	sed -i $changeLine ${svnDest}/web/frontend_dev.php
+	#sed $changeLine ${svnDest}/web/backend.php > ${svnDest}/web/backend_temp.php
+	#mv ${svnDest}/web/backend_temp.php ${svnDest}/web/backend.php
+	sed -i $changeLine ${svnDest}/web/backend.php
+	#sed $changeLine ${svnDest}/web/backend_dev.php > ${svnDest}/web/backend_dev_temp.php
+	#mv ${svnDest}/web/backend_dev_temp.php ${svnDest}/web/backend_dev.php
+	sed -i $changeLine ${svnDest}/web/backend_dev.php
+else
+	echo 'Pominięto ustawianie odpowiednich wartości w project_config'
+fi
+
+# 4.5 - zakomentowanie linjki uniemożliwijącej dostęp do kontrolerów dev z poza localhosta
+if [ $skip_controller_allow_flag -eq 0 ]
+then
+	changeLine2='s/die/\/\/die/'
+	#sed $changeLine2 ${svnDest}/web/frontend_dev.php > ${svnDest}/web/frontend_dev_temp.php
+	#mv ${svnDest}/web/frontend_dev_temp.php ${svnDest}/web/frontend_dev.php
+	sed -i $changeLine2 ${svnDest}/web/frontend_dev.php
+	#sed $changeLine2 ${svnDest}/web/backend_dev.php > ${svnDest}/web/backend_dev_temp.php
+	#mv ${svnDest}/web/backend_dev_temp.php ${svnDest}/web/backend_dev.php
+	sed -i $changeLine2 ${svnDest}/web/backend_dev.php
+else
+	echo 'Pominięto udostępnianie frontowych kontrolerów dla wszystkich'
+fi
+
+# 5 - ustawianie praw
+# bez warunku bo to zupełnie nieszkodliwe
+chmod -R 755 $svnDest
+chmod 777 ${svnDest}/pzg/cache ${svnDest}/pzg/log
+
+# 6 - wrzucanie na ftp
+# sporo pomogło to: http://pomoc.bg.univ.gda.pl/ftp_script.html
+if [ $skip_ftp_flag -eq 0 ]
+then
+#ftp -n $ftpDestination << KONIEC
+#mv ${svnDest}/web ${svnDest}/public_html
+lftp $ftpDestination << KONIEC
+set ftp:ssl-allow no
+user $ftpUser $ftpPass
+
+rm -rf pzg
+lcd $svnDest
+mirror -R pzg
+cd pzg
+chmod 777 log cache
+cd ..
+cd public_html
+mrm -rf *
+cd ..
+mirror -R web public_html
+
+KONIEC
+else
+	echo 'Pominięto przesyłanie plików na serwer'
+fi
