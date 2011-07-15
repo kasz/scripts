@@ -1,0 +1,24 @@
+#! /bin/bash
+
+# Skrypt tworzący nowe repozytorium git podłączone do githuba.
+# Używać PO stworzeniu repozytorium na githubie.
+# Pierwszy parametr to nazwa repozytorium
+# Drugi parametr to adres repozytorium
+
+if [ "$#" -ne 2 ]
+then
+    echo -e "Nie podano wystarczającej liczby parametrów"
+    exit -1
+fi
+
+repo_name=$1
+repo_address=$2
+
+mkdir $repo_name
+cd $repo_name
+git init
+touch README
+git add README
+git commit -m 'Repository init'
+git remote add origin $repo_address
+git push -u origin master
